@@ -26,16 +26,71 @@ const CRS_OPTIONS = [
   { value: "EPSG:4269", label: "NAD83 (EPSG:4269)" },
 ];
 
+const PASTE_PLACEHOLDER = `Paste anything:
+
+• CSV with headers (name,lat,lon,...)
+• GeoJSON FeatureCollection
+• Bare coordinates, one per line:
+  37.7749, -122.4194
+  40.7128, -74.0060`;
+
+/** Turn pasted text into a File the /clean API understands. */
+function pasteToFile(raw: string): File {
+  const text = raw.trim();
+  if (!text) throw new Error("Nothing to paste");
+
+  // GeoJSON
+  if (text.startsWith("{") || text.startsWith("[")) {
+    try {
+      JSON.parse(text);
+      return new File([text], "pasted.geojson", { type: "application/geo+json" });
+    } catch {
+      // fall through — might be weird CSV that starts with {
+    }
+  }
+
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+  // Bare lat,lon (or lon,lat) lines without a header
+  const coordOnly = lines.every((line) => {
+    const parts = line.split(/[,\s\t]+/).filter(Boolean);
+    if (parts.length < 2) return false;
+    const a = Number(parts[0]);
+    const b = Number(parts[1]);
+    return Number.isFinite(a) && Number.isFinite(b);
+  });
+
+  if (coordOnly && lines.length > 0) {
+    // Heuristic: if |first| > 90 treat as lon,lat else lat,lon
+    const first = Number(lines[0].split(/[,\s\t]+/)[0]);
+    const lonFirst = Math.abs(first) > 90;
+    const header = lonFirst ? "longitude,latitude" : "latitude,longitude";
+    const body = lines
+      .map((line) => {
+        const parts = line.split(/[,\s\t]+/).filter(Boolean);
+        return `${parts[0]},${parts[1]}`;
+      })
+      .join("\n");
+    const csv = `${header}\n${body}`;
+    return new File([csv], "pasted-coords.csv", { type: "text/csv" });
+  }
+
+  // Default: treat as CSV
+  return new File([text], "pasted.csv", { type: "text/csv" });
+}
+
 export default function Home() {
   const [tab, setTab] = useState<Tab>("clean");
   const [status, setStatus] = useState<string>(
-    "Drop CSV, GeoJSON, or Shapefile (.zip) — or try the sample"
+    "Drop a file, paste raw data, or try the sample"
   );
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [targetCrs, setTargetCrs] = useState("EPSG:4326");
   const [sourceCrs, setSourceCrs] = useState("");
   const [copied, setCopied] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [inputMode, setInputMode] = useState<"drop" | "paste">("drop");
   const [popupInfo, setPopupInfo] = useState<{
     longitude: number;
     latitude: number;
@@ -93,6 +148,15 @@ export default function Home() {
     const file = new File([SAMPLE_CSV], "parks-demo.csv", { type: "text/csv" });
     await runClean(file);
   }, [runClean]);
+
+  const runPaste = useCallback(async () => {
+    try {
+      const file = pasteToFile(pasteText);
+      await runClean(file);
+    } catch (e: any) {
+      setStatus(e.message || "Could not parse pasted data");
+    }
+  }, [pasteText, runClean]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -187,7 +251,7 @@ export default function Home() {
         const v = f.properties?.[c];
         if (v == null) return "";
         const s = String(v).replace(/"/g, '""');
-        return s.includes(",") || s.includes("\"") ? `"${s}"` : s;
+        return s.includes(",") || s.includes('"') ? `"${s}"` : s;
       });
       lines.push(row.join(","));
     }
@@ -288,7 +352,7 @@ export default function Home() {
             <div className="text-center space-y-2">
               <h1 className="text-3xl font-bold tracking-tight">Zero-friction geo cleaning</h1>
               <p className="text-slate-400">
-                CSV · GeoJSON · Shapefile (zip) → validated, reprojected, ready for the web
+                Drop · paste · sample → validated, reprojected, ready for the web
               </p>
             </div>
 
@@ -328,24 +392,84 @@ export default function Home() {
               </button>
             </div>
 
-            <div
-              {...getRootProps()}
-              className={`border-2 border-dashed rounded-2xl p-12 sm:p-16 text-center cursor-pointer transition
-                ${
-                  isDragActive
-                    ? "border-emerald-400 bg-emerald-950/30"
-                    : "border-slate-700 hover:border-slate-500"
-                }
-                ${loading ? "opacity-60 pointer-events-none" : ""}`}
-            >
-              <input {...getInputProps()} />
-              <p className="text-lg">
-                {isDragActive
-                  ? "Drop it!"
-                  : "Drag & drop CSV, GeoJSON, or Shapefile (.zip)"}
-              </p>
-              <p className="text-sm text-slate-500 mt-2">or click to browse</p>
+            {/* Drop vs Paste toggle */}
+            <div className="flex justify-center gap-1 p-1 bg-slate-900 rounded-xl border border-slate-800 w-fit mx-auto">
+              <button
+                onClick={() => setInputMode("drop")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${
+                  inputMode === "drop"
+                    ? "bg-emerald-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Drop file
+              </button>
+              <button
+                onClick={() => setInputMode("paste")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${
+                  inputMode === "paste"
+                    ? "bg-emerald-600 text-white"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Paste data
+              </button>
             </div>
+
+            {inputMode === "drop" ? (
+              <div
+                {...getRootProps()}
+                className={`border-2 border-dashed rounded-2xl p-12 sm:p-16 text-center cursor-pointer transition
+                  ${
+                    isDragActive
+                      ? "border-emerald-400 bg-emerald-950/30"
+                      : "border-slate-700 hover:border-slate-500"
+                  }
+                  ${loading ? "opacity-60 pointer-events-none" : ""}`}
+              >
+                <input {...getInputProps()} />
+                <p className="text-lg">
+                  {isDragActive
+                    ? "Drop it!"
+                    : "Drag & drop CSV, GeoJSON, or Shapefile (.zip)"}
+                </p>
+                <p className="text-sm text-slate-500 mt-2">or click to browse</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <textarea
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                  placeholder={PASTE_PLACEHOLDER}
+                  rows={10}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-2xl p-4 text-sm text-slate-100 font-mono placeholder:text-slate-600 focus:outline-none focus:border-emerald-600 resize-y min-h-[180px]"
+                  disabled={loading}
+                />
+                <div className="flex flex-wrap gap-2 justify-center">
+                  <button
+                    onClick={runPaste}
+                    disabled={loading || !pasteText.trim()}
+                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-sm font-medium transition"
+                  >
+                    Clean pasted data
+                  </button>
+                  <button
+                    onClick={() => setPasteText(SAMPLE_CSV)}
+                    disabled={loading}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition border border-slate-700"
+                  >
+                    Fill sample CSV
+                  </button>
+                  <button
+                    onClick={() => setPasteText("")}
+                    disabled={loading || !pasteText}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 rounded-lg text-sm font-medium transition border border-slate-700"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="text-center text-sm text-slate-400">{status}</div>
 
@@ -537,13 +661,12 @@ export default function Home() {
               <FeatureCard
                 title="Already live"
                 items={[
-                  "CSV + GeoJSON + Shapefile (.zip)",
+                  "Drop CSV / GeoJSON / Shapefile (.zip)",
+                  "Paste raw CSV, GeoJSON, or lat/lon lines",
                   "One-click sample parks dataset",
                   "Auto lat/lon detection",
                   "Geometry validation & repair",
                   "Source + target CRS controls",
-                  "Deduplicate + explode multi-geoms",
-                  "Audit log of every change",
                   "Export GeoJSON · CSV · Copy",
                   "Map: points, lines & polygons",
                   "Click popups + attribute table",
@@ -559,21 +682,9 @@ export default function Home() {
                   "Attribute cleaning rules",
                   "Save & share wrangle recipes",
                   "Batch / API key access",
-                  "Team workspaces",
-                  "Versioned datasets",
                 ]}
                 accent="sky"
               />
-            </div>
-
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-              <h3 className="font-medium text-slate-200 mb-2">Bigger vision (gh-impact)</h3>
-              <ul className="text-sm text-slate-400 space-y-1 list-disc list-inside">
-                <li>Zero-friction geographic data infrastructure for impact, climate & urban work</li>
-                <li>Reusable pipelines instead of one-off scripts</li>
-                <li>Connect cleaned layers to analysis & storytelling tools</li>
-                <li>Team workspaces and versioned datasets</li>
-              </ul>
             </div>
           </div>
         )}
