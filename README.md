@@ -27,7 +27,7 @@ A micro-tool specifically designed to take messy CSVs, local property records, o
    - Basic attribute type coercion & cleaning
 
 3. **Preview + Export**
-   - Live map preview (MapLibre)
+   - Live map preview (MapLibre) — coming next
    - Download clean **GeoJSON** or **Shapefile**
    - Copy as FeatureCollection
    - Optional: H3 indexing, simple spatial joins later
@@ -36,24 +36,55 @@ A micro-tool specifically designed to take messy CSVs, local property records, o
    - Show exactly what was changed
    - One-click “wrangle recipe” for reuse
 
-## Tech Stack (planned)
+## Tech Stack
 
 - **Frontend**: Next.js + Tailwind + MapLibre GL + react-dropzone
-- **Backend**: FastAPI + GeoPandas / Shapely / pyproj + DuckDB Spatial
-- **Storage**: Temporary (S3 or local) for processing; no long-term storage in MVP
-- **Deploy**: Vercel (frontend) + Railway / Fly.io / Render (API)
+- **Backend**: FastAPI + GeoPandas / Shapely / pyproj
+- **Storage**: Temporary for processing; no long-term storage in MVP
+- **Deploy target**: Vercel (frontend) + Railway / Fly.io / Render (API)
 
-## Quick Start (coming soon)
+## Local Development
+
+### 1. Backend
 
 ```bash
-git clone https://github.com/KristineMK72/gh-impact-wrangler.git
-cd gh-impact-wrangler
-# ... setup instructions will land here
+cd backend
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
 ```
+
+API docs: http://localhost:8000/docs
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:3000 and drop a CSV or GeoJSON.
+
+### Example CSV
+
+```csv
+name,latitude,longitude
+Park A,37.7749,-122.4194
+Park B,34.0522,-118.2437
+```
+
+The tool will auto-detect the lat/lon columns, create points, clean, and return GeoJSON.
 
 ## Status
 
-🚧 Early scaffolding — building the drag-and-drop → clean GeoJSON path first.
+✅ Repo scaffolded  
+✅ FastAPI `/clean` endpoint (CSV + GeoJSON → cleaned GeoJSON + audit)  
+✅ Minimal Next.js dropzone UI  
+🚧 Map preview  
+🚧 Shapefile upload/export  
+🚧 Better CRS detection & UI controls  
 
 Part of the broader **gh-impact** vision: zero-friction geographic data infrastructure for impact analysis, climate, urban planning, and more.
 
