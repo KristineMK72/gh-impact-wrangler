@@ -28,10 +28,14 @@ const CRS_OPTIONS = [
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("clean");
-  const [status, setStatus] = useState<string>("Drop a CSV or GeoJSON — or try the sample");
+  const [status, setStatus] = useState<string>(
+    "Drop CSV, GeoJSON, or Shapefile (.zip) — or try the sample"
+  );
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [targetCrs, setTargetCrs] = useState("EPSG:4326");
+  const [sourceCrs, setSourceCrs] = useState("");
+  const [copied, setCopied] = useState(false);
   const [popupInfo, setPopupInfo] = useState<{
     longitude: number;
     latitude: number;
@@ -44,10 +48,12 @@ export default function Home() {
       setStatus(`Processing ${file.name}...`);
       setResult(null);
       setPopupInfo(null);
+      setCopied(false);
 
       const formData = new FormData();
       formData.append("file", file);
       formData.append("target_crs", targetCrs);
+      if (sourceCrs.trim()) formData.append("source_crs", sourceCrs.trim());
 
       try {
         const res = await fetch("/api/clean", {
@@ -71,7 +77,7 @@ export default function Home() {
         setLoading(false);
       }
     },
-    [targetCrs]
+    [targetCrs, sourceCrs]
   );
 
   const onDrop = useCallback(
@@ -94,6 +100,8 @@ export default function Home() {
       "text/csv": [".csv"],
       "application/geo+json": [".geojson", ".json"],
       "application/json": [".json"],
+      "application/zip": [".zip"],
+      "application/x-zip-compressed": [".zip"],
     },
     multiple: false,
   });
@@ -102,13 +110,19 @@ export default function Home() {
     if (!result?.geojson?.features?.length) {
       return { longitude: -98.5, latitude: 39.8, zoom: 3 };
     }
-    const coords = result.geojson.features
-      .map((f: any) => f.geometry?.coordinates)
-      .filter(Boolean);
-    if (!coords.length) return { longitude: -98.5, latitude: 39.8, zoom: 3 };
+    const all: number[][] = [];
+    for (const f of result.geojson.features) {
+      const g = f.geometry;
+      if (!g) continue;
+      if (g.type === "Point") all.push(g.coordinates);
+      else if (g.type === "LineString") all.push(...g.coordinates);
+      else if (g.type === "Polygon") all.push(...(g.coordinates[0] || []));
+      else if (g.type === "MultiPoint") all.push(...g.coordinates);
+    }
+    if (!all.length) return { longitude: -98.5, latitude: 39.8, zoom: 3 };
 
-    const lons = coords.map((c: number[]) => c[0]);
-    const lats = coords.map((c: number[]) => c[1]);
+    const lons = all.map((c) => c[0]);
+    const lats = all.map((c) => c[1]);
     const longitude = (Math.min(...lons) + Math.max(...lons)) / 2;
     const latitude = (Math.min(...lats) + Math.max(...lats)) / 2;
     const span = Math.max(
@@ -119,7 +133,7 @@ export default function Home() {
     if (span < 0.5) zoom = 10;
     else if (span < 2) zoom = 7;
     else if (span < 10) zoom = 5;
-    if (coords.length === 1) zoom = 11;
+    if (all.length === 1) zoom = 11;
     return { longitude, latitude, zoom };
   }, [result]);
 
@@ -151,16 +165,62 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
+  const downloadCSV = () => {
+    if (!result?.geojson?.features?.length) return;
+    const features = result.geojson.features;
+    const propsKeys = new Set<string>();
+    features.forEach((f: any) =>
+      Object.keys(f.properties || {}).forEach((k) => propsKeys.add(k))
+    );
+    const cols = ["longitude", "latitude", ...Array.from(propsKeys)];
+    const lines = [cols.join(",")];
+    for (const f of features) {
+      let lon = "";
+      let lat = "";
+      if (f.geometry?.type === "Point") {
+        lon = String(f.geometry.coordinates[0]);
+        lat = String(f.geometry.coordinates[1]);
+      }
+      const row = cols.map((c) => {
+        if (c === "longitude") return lon;
+        if (c === "latitude") return lat;
+        const v = f.properties?.[c];
+        if (v == null) return "";
+        const s = String(v).replace(/"/g, '""');
+        return s.includes(",") || s.includes("\"") ? `"${s}"` : s;
+      });
+      lines.push(row.join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "cleaned.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const copyGeoJSON = async () => {
+    if (!result?.geojson) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(result.geojson, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setStatus("Could not copy to clipboard");
+    }
+  };
+
   const onMapClick = (e: MapLayerMouseEvent) => {
     const feature = e.features?.[0];
-    if (!feature || feature.geometry.type !== "Point") {
+    if (!feature) {
       setPopupInfo(null);
       return;
     }
-    const coords = (feature.geometry as any).coordinates as [number, number];
+    const lngLat = e.lngLat;
     setPopupInfo({
-      longitude: coords[0],
-      latitude: coords[1],
+      longitude: lngLat.lng,
+      latitude: lngLat.lat,
       properties: (feature.properties || {}) as Record<string, unknown>,
     });
   };
@@ -170,6 +230,29 @@ export default function Home() {
     { id: "map", label: "Map" },
     { id: "features", label: "Roadmap" },
   ];
+
+  const exportButtons = result && (
+    <div className="flex flex-wrap gap-2">
+      <button
+        onClick={downloadGeoJSON}
+        className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition"
+      >
+        GeoJSON
+      </button>
+      <button
+        onClick={downloadCSV}
+        className="px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition border border-slate-700"
+      >
+        CSV
+      </button>
+      <button
+        onClick={copyGeoJSON}
+        className="px-3 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition border border-slate-700"
+      >
+        {copied ? "Copied!" : "Copy"}
+      </button>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
@@ -200,32 +283,42 @@ export default function Home() {
       </header>
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 py-8 space-y-6">
-        {/* CLEAN TAB */}
         {tab === "clean" && (
           <div className="space-y-6">
             <div className="text-center space-y-2">
               <h1 className="text-3xl font-bold tracking-tight">Zero-friction geo cleaning</h1>
               <p className="text-slate-400">
-                Messy CSV or GeoJSON → validated, reprojected, ready for the web
+                CSV · GeoJSON · Shapefile (zip) → validated, reprojected, ready for the web
               </p>
             </div>
 
-            {/* CRS picker */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3">
-              <label className="text-sm text-slate-400 flex items-center gap-2">
-                Target CRS
-                <select
-                  value={targetCrs}
-                  onChange={(e) => setTargetCrs(e.target.value)}
-                  className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
-                >
-                  {CRS_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <div className="flex flex-col gap-3 items-center">
+              <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center justify-center gap-3">
+                <label className="text-sm text-slate-400 flex items-center gap-2">
+                  Target CRS
+                  <select
+                    value={targetCrs}
+                    onChange={(e) => setTargetCrs(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100"
+                  >
+                    {CRS_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-sm text-slate-400 flex items-center gap-2">
+                  Source CRS
+                  <input
+                    type="text"
+                    placeholder="auto / e.g. EPSG:26915"
+                    value={sourceCrs}
+                    onChange={(e) => setSourceCrs(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 w-44"
+                  />
+                </label>
+              </div>
               <button
                 onClick={loadSample}
                 disabled={loading}
@@ -247,7 +340,9 @@ export default function Home() {
             >
               <input {...getInputProps()} />
               <p className="text-lg">
-                {isDragActive ? "Drop it!" : "Drag & drop a CSV or GeoJSON here"}
+                {isDragActive
+                  ? "Drop it!"
+                  : "Drag & drop CSV, GeoJSON, or Shapefile (.zip)"}
               </p>
               <p className="text-sm text-slate-500 mt-2">or click to browse</p>
             </div>
@@ -258,19 +353,14 @@ export default function Home() {
               <div className="bg-slate-900 rounded-xl p-6 space-y-4 border border-slate-800">
                 <div className="flex items-center justify-between gap-4 flex-wrap">
                   <h2 className="font-semibold text-emerald-400">Audit log</h2>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2 items-center">
                     <button
                       onClick={() => setTab("map")}
                       className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition"
                     >
                       View on map
                     </button>
-                    <button
-                      onClick={downloadGeoJSON}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition"
-                    >
-                      Download GeoJSON
-                    </button>
+                    {exportButtons}
                   </div>
                 </div>
                 <pre className="text-xs overflow-auto max-h-48 bg-slate-950 p-4 rounded border border-slate-800">
@@ -281,7 +371,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* MAP TAB */}
         {tab === "map" && (
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -289,11 +378,11 @@ export default function Home() {
                 <h2 className="text-xl font-semibold">Map preview</h2>
                 <p className="text-sm text-slate-400">
                   {result
-                    ? `${result.feature_count} cleaned features · click a point for details`
+                    ? `${result.feature_count} cleaned features · click for details`
                     : "Clean some data first to see it here"}
                 </p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 {!result && (
                   <button
                     onClick={loadSample}
@@ -303,14 +392,7 @@ export default function Home() {
                     Load sample
                   </button>
                 )}
-                {result && (
-                  <button
-                    onClick={downloadGeoJSON}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition"
-                  >
-                    Download GeoJSON
-                  </button>
-                )}
+                {exportButtons}
               </div>
             </div>
 
@@ -320,7 +402,7 @@ export default function Home() {
                 key={result ? `${result.feature_count}-${targetCrs}` : "empty"}
                 style={{ width: "100%", height: "100%" }}
                 mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
-                interactiveLayerIds={result ? ["points"] : []}
+                interactiveLayerIds={result ? ["points", "polygons-fill", "lines"] : []}
                 onClick={onMapClick}
                 cursor={result ? "pointer" : "grab"}
               >
@@ -328,8 +410,36 @@ export default function Home() {
                 {result?.geojson && (
                   <Source id="cleaned" type="geojson" data={result.geojson}>
                     <Layer
+                      id="polygons-fill"
+                      type="fill"
+                      filter={["==", ["geometry-type"], "Polygon"]}
+                      paint={{
+                        "fill-color": "#34d399",
+                        "fill-opacity": 0.35,
+                      }}
+                    />
+                    <Layer
+                      id="polygons-outline"
+                      type="line"
+                      filter={["==", ["geometry-type"], "Polygon"]}
+                      paint={{
+                        "line-color": "#059669",
+                        "line-width": 2,
+                      }}
+                    />
+                    <Layer
+                      id="lines"
+                      type="line"
+                      filter={["==", ["geometry-type"], "LineString"]}
+                      paint={{
+                        "line-color": "#34d399",
+                        "line-width": 3,
+                      }}
+                    />
+                    <Layer
                       id="points"
                       type="circle"
+                      filter={["==", ["geometry-type"], "Point"]}
                       paint={{
                         "circle-radius": 8,
                         "circle-color": "#34d399",
@@ -348,11 +458,10 @@ export default function Home() {
                     closeOnClick={false}
                     className="text-slate-900"
                   >
-                    <div className="text-xs space-y-1 max-w-[200px]">
+                    <div className="text-xs space-y-1 max-w-[220px]">
                       {Object.entries(popupInfo.properties).map(([k, v]) => (
                         <div key={k}>
-                          <span className="font-semibold">{k}:</span>{" "}
-                          <span>{String(v)}</span>
+                          <span className="font-semibold">{k}:</span> {String(v)}
                         </div>
                       ))}
                       {!Object.keys(popupInfo.properties).length && (
@@ -364,7 +473,6 @@ export default function Home() {
               </Map>
             </div>
 
-            {/* Attribute table */}
             {attributeRows.length > 0 && (
               <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
                 <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
@@ -410,13 +518,12 @@ export default function Home() {
                 <button onClick={() => setTab("clean")} className="text-emerald-400 underline">
                   Clean
                 </button>{" "}
-                tab or load the sample to see points here.
+                tab or load the sample.
               </p>
             )}
           </div>
         )}
 
-        {/* ROADMAP TAB */}
         {tab === "features" && (
           <div className="space-y-6">
             <div>
@@ -430,30 +537,30 @@ export default function Home() {
               <FeatureCard
                 title="Already live"
                 items={[
-                  "CSV + GeoJSON upload",
+                  "CSV + GeoJSON + Shapefile (.zip)",
                   "One-click sample parks dataset",
                   "Auto lat/lon detection",
                   "Geometry validation & repair",
-                  "Target CRS picker",
-                  "Deduplicate points",
+                  "Source + target CRS controls",
+                  "Deduplicate + explode multi-geoms",
                   "Audit log of every change",
-                  "Download clean GeoJSON",
-                  "Live map + click popups",
-                  "Attribute table",
+                  "Export GeoJSON · CSV · Copy",
+                  "Map: points, lines & polygons",
+                  "Click popups + attribute table",
                 ]}
                 accent="emerald"
               />
               <FeatureCard
                 title="Next up"
                 items={[
-                  "Shapefile (zip) upload & export",
-                  "Source CRS override",
                   "Address geocoding",
                   "Buffer, clip, spatial join",
                   "H3 / geohash indexing",
                   "Attribute cleaning rules",
                   "Save & share wrangle recipes",
                   "Batch / API key access",
+                  "Team workspaces",
+                  "Versioned datasets",
                 ]}
                 accent="sky"
               />
