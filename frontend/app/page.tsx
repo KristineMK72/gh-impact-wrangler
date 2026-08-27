@@ -21,8 +21,11 @@ export default function Home() {
     formData.append("target_crs", "EPSG:4326");
 
     try {
-      // Point this at your local FastAPI server
-      const res = await fetch("http://localhost:8000/clean", {
+      // On Vercel this hits the backend service via the /api rewrite.
+      // Locally you can either:
+      //   1. Run `vercel dev` (recommended), or
+      //   2. Run the FastAPI server on :8000 and temporarily change this to http://localhost:8000/clean
+      const res = await fetch("/api/clean", {
         method: "POST",
         body: formData,
       });
@@ -37,7 +40,7 @@ export default function Home() {
       setResult(data);
       setStatus(`Done! ${data.feature_count} features cleaned.`);
     } catch (err: any) {
-      setStatus(`Failed to reach API: ${err.message}. Is the backend running on :8000?`);
+      setStatus(`Failed to reach API: ${err.message}`);
     } finally {
       setLoading(false);
     }
