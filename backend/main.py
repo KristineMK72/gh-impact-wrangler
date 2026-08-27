@@ -10,8 +10,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Point
 from shapely.validation import make_valid
-import pyproj
-from io import BytesIO, StringIO
+from io import BytesIO
 import json
 from typing import Optional
 
@@ -67,21 +66,18 @@ def clean_geodataframe(
 
     # Reproject
     if gdf.crs is None:
-        # Assume WGS84 if no CRS (common for lat/lon CSVs)
         gdf = gdf.set_crs("EPSG:4326")
         audit["actions"].append("Assumed source CRS = EPSG:4326 (no CRS detected)")
     elif str(gdf.crs) != target_crs:
         gdf = gdf.to_crs(target_crs)
         audit["actions"].append(f"Reprojected from {audit['original_crs']} → {target_crs}")
 
-    # Drop still-invalid after repair (optional)
     if drop_invalid:
         still_invalid = ~gdf.geometry.is_valid
         if still_invalid.any():
             gdf = gdf[~still_invalid]
             audit["actions"].append(f"Dropped {still_invalid.sum()} still-invalid geometries")
 
-    # Deduplicate by geometry
     before = len(gdf)
     gdf = gdf.drop_duplicates(subset=["geometry"])
     if len(gdf) < before:
@@ -93,16 +89,18 @@ def clean_geodataframe(
 
 
 @app.get("/")
+@app.get("/api")
 def root():
     return {
         "service": "gh-impact-wrangler",
         "status": "ready",
         "message": "Upload messy spatial data → get clean GeoJSON in seconds",
-        "endpoints": ["/clean", "/docs"],
+        "endpoints": ["/clean", "/api/clean", "/docs"],
     }
 
 
 @app.post("/clean")
+@app.post("/api/clean")
 async def clean_data(
     file: UploadFile = File(...),
     target_crs: str = Form("EPSG:4326"),
@@ -112,6 +110,7 @@ async def clean_data(
 ):
     """
     Accept CSV (with lat/lon) or GeoJSON → return cleaned GeoJSON + audit.
+    Works at both /clean and /api/clean (for Vercel multi-service routing).
     """
     content = await file.read()
     filename = file.filename or "upload"
@@ -132,7 +131,6 @@ async def clean_data(
                            "Please specify lat_col and lon_col.",
                 )
 
-            # Create points
             geometry = [
                 Point(xy) for xy in zip(df[lon_col].astype(float), df[lat_col].astype(float))
             ]
@@ -141,7 +139,7 @@ async def clean_data(
             if source_crs:
                 gdf = gdf.set_crs(source_crs)
             else:
-                gdf = gdf.set_crs("EPSG:4326")  # common default for lat/lon CSVs
+                gdf = gdf.set_crs("EPSG:4326")
 
         elif filename.lower().endswith((".geojson", ".json")) or "geojson" in (file.content_type or ""):
             gdf = gpd.read_file(BytesIO(content))
@@ -154,8 +152,6 @@ async def clean_data(
             )
 
         cleaned, audit = clean_geodataframe(gdf, target_crs=target_crs)
-
-        # Convert to GeoJSON
         geojson = json.loads(cleaned.to_json())
 
         return JSONResponse(
@@ -167,6 +163,8 @@ async def clean_data(
             }
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
