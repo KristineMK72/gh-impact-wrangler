@@ -20,6 +20,12 @@ Griffith Park,34.1367,-118.2942,Los Angeles
 Millennium Park,41.8826,-87.6226,Chicago
 Balboa Park,32.7341,-117.1446,San Diego`;
 
+const SAMPLE_ADDRESSES = `Golden Gate Park, San Francisco, CA
+Central Park, New York, NY
+Griffith Observatory, Los Angeles, CA
+Millennium Park, Chicago, IL
+Balboa Park, San Diego, CA`;
+
 const CRS_OPTIONS = [
   { value: "EPSG:4326", label: "WGS84 (EPSG:4326) — web maps" },
   { value: "EPSG:3857", label: "Web Mercator (EPSG:3857)" },
@@ -30,38 +36,31 @@ const PASTE_PLACEHOLDER = `Paste anything:
 
 • CSV with headers (name,lat,lon,...)
 • GeoJSON FeatureCollection
-• Bare coordinates, one per line:
-  37.7749, -122.4194
-  40.7128, -74.0060`;
+• Bare coordinates, one per line
+• Or addresses (use Geocode button):
+  Golden Gate Park, San Francisco, CA`;
 
-/** Turn pasted text into a File the /clean API understands. */
 function pasteToFile(raw: string): File {
   const text = raw.trim();
   if (!text) throw new Error("Nothing to paste");
 
-  // GeoJSON
   if (text.startsWith("{") || text.startsWith("[")) {
     try {
       JSON.parse(text);
       return new File([text], "pasted.geojson", { type: "application/geo+json" });
     } catch {
-      // fall through — might be weird CSV that starts with {
+      /* fall through */
     }
   }
 
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-
-  // Bare lat,lon (or lon,lat) lines without a header
   const coordOnly = lines.every((line) => {
     const parts = line.split(/[,\s\t]+/).filter(Boolean);
     if (parts.length < 2) return false;
-    const a = Number(parts[0]);
-    const b = Number(parts[1]);
-    return Number.isFinite(a) && Number.isFinite(b);
+    return Number.isFinite(Number(parts[0])) && Number.isFinite(Number(parts[1]));
   });
 
   if (coordOnly && lines.length > 0) {
-    // Heuristic: if |first| > 90 treat as lon,lat else lat,lon
     const first = Number(lines[0].split(/[,\s\t]+/)[0]);
     const lonFirst = Math.abs(first) > 90;
     const header = lonFirst ? "longitude,latitude" : "latitude,longitude";
@@ -71,23 +70,21 @@ function pasteToFile(raw: string): File {
         return `${parts[0]},${parts[1]}`;
       })
       .join("\n");
-    const csv = `${header}\n${body}`;
-    return new File([csv], "pasted-coords.csv", { type: "text/csv" });
+    return new File([`${header}\n${body}`], "pasted-coords.csv", { type: "text/csv" });
   }
 
-  // Default: treat as CSV
   return new File([text], "pasted.csv", { type: "text/csv" });
 }
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("clean");
-  const [status, setStatus] = useState<string>(
-    "Drop a file, paste raw data, or try the sample"
-  );
+  const [status, setStatus] = useState("Drop, paste, geocode, or try the sample");
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [targetCrs, setTargetCrs] = useState("EPSG:4326");
   const [sourceCrs, setSourceCrs] = useState("");
+  const [bufferMeters, setBufferMeters] = useState("");
+  const [h3Resolution, setH3Resolution] = useState("");
   const [copied, setCopied] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [inputMode, setInputMode] = useState<"drop" | "paste">("drop");
@@ -96,6 +93,18 @@ export default function Home() {
     latitude: number;
     properties: Record<string, unknown>;
   } | null>(null);
+
+  const appendExtras = useCallback(
+    (formData: FormData) => {
+      formData.append("target_crs", targetCrs);
+      if (sourceCrs.trim()) formData.append("source_crs", sourceCrs.trim());
+      const buf = parseFloat(bufferMeters);
+      if (!Number.isNaN(buf) && buf > 0) formData.append("buffer_meters", String(buf));
+      const h3 = parseInt(h3Resolution, 10);
+      if (!Number.isNaN(h3) && h3 >= 0) formData.append("h3_resolution", String(h3));
+    },
+    [targetCrs, sourceCrs, bufferMeters, h3Resolution]
+  );
 
   const runClean = useCallback(
     async (file: File) => {
@@ -107,22 +116,15 @@ export default function Home() {
 
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("target_crs", targetCrs);
-      if (sourceCrs.trim()) formData.append("source_crs", sourceCrs.trim());
+      appendExtras(formData);
 
       try {
-        const res = await fetch("/api/clean", {
-          method: "POST",
-          body: formData,
-        });
-
+        const res = await fetch("/api/clean", { method: "POST", body: formData });
         const data = await res.json();
-
         if (!res.ok) {
           setStatus(`Error: ${data.detail || "Something went wrong"}`);
           return;
         }
-
         setResult(data);
         setStatus(`Done! ${data.feature_count} features cleaned.`);
         setTab("map");
@@ -132,27 +134,56 @@ export default function Home() {
         setLoading(false);
       }
     },
-    [targetCrs, sourceCrs]
+    [appendExtras]
   );
+
+  const runGeocode = useCallback(async () => {
+    const text = pasteText.trim();
+    if (!text) {
+      setStatus("Paste addresses first (one per line)");
+      return;
+    }
+    setLoading(true);
+    setStatus("Geocoding addresses (Nominatim, ~1/sec)...");
+    setResult(null);
+    setPopupInfo(null);
+
+    const formData = new FormData();
+    formData.append("addresses", text);
+    appendExtras(formData);
+
+    try {
+      const res = await fetch("/api/geocode", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) {
+        setStatus(`Error: ${data.detail || "Geocoding failed"}`);
+        return;
+      }
+      setResult(data);
+      setStatus(`Done! Geocoded ${data.feature_count} addresses.`);
+      setTab("map");
+    } catch (err: any) {
+      setStatus(`Failed: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [pasteText, appendExtras]);
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
       const file = acceptedFiles[0];
-      if (!file) return;
-      await runClean(file);
+      if (file) await runClean(file);
     },
     [runClean]
   );
 
   const loadSample = useCallback(async () => {
-    const file = new File([SAMPLE_CSV], "parks-demo.csv", { type: "text/csv" });
-    await runClean(file);
+    await runClean(new File([SAMPLE_CSV], "parks-demo.csv", { type: "text/csv" }));
   }, [runClean]);
 
   const runPaste = useCallback(async () => {
     try {
-      const file = pasteToFile(pasteText);
-      await runClean(file);
+      await runClean(pasteToFile(pasteText));
     } catch (e: any) {
       setStatus(e.message || "Could not parse pasted data");
     }
@@ -184,7 +215,6 @@ export default function Home() {
       else if (g.type === "MultiPoint") all.push(...g.coordinates);
     }
     if (!all.length) return { longitude: -98.5, latitude: 39.8, zoom: 3 };
-
     const lons = all.map((c) => c[0]);
     const lats = all.map((c) => c[1]);
     const longitude = (Math.min(...lons) + Math.max(...lons)) / 2;
@@ -281,10 +311,9 @@ export default function Home() {
       setPopupInfo(null);
       return;
     }
-    const lngLat = e.lngLat;
     setPopupInfo({
-      longitude: lngLat.lng,
-      latitude: lngLat.lat,
+      longitude: e.lngLat.lng,
+      latitude: e.lngLat.lat,
       properties: (feature.properties || {}) as Record<string, unknown>,
     });
   };
@@ -323,9 +352,7 @@ export default function Home() {
       <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <span className="text-emerald-400 font-bold text-lg tracking-tight">
-              gh-impact
-            </span>
+            <span className="text-emerald-400 font-bold text-lg tracking-tight">gh-impact</span>
             <span className="text-slate-500 text-sm hidden sm:inline">wrangler</span>
           </div>
           <nav className="flex gap-1">
@@ -352,10 +379,11 @@ export default function Home() {
             <div className="text-center space-y-2">
               <h1 className="text-3xl font-bold tracking-tight">Zero-friction geo cleaning</h1>
               <p className="text-slate-400">
-                Drop · paste · sample → validated, reprojected, ready for the web
+                Drop · paste · geocode · buffer · H3 → ready for the web
               </p>
             </div>
 
+            {/* Options */}
             <div className="flex flex-col gap-3 items-center">
               <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center justify-center gap-3">
                 <label className="text-sm text-slate-400 flex items-center gap-2">
@@ -376,10 +404,33 @@ export default function Home() {
                   Source CRS
                   <input
                     type="text"
-                    placeholder="auto / e.g. EPSG:26915"
+                    placeholder="auto"
                     value={sourceCrs}
                     onChange={(e) => setSourceCrs(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 w-44"
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm w-36 text-slate-100"
+                  />
+                </label>
+                <label className="text-sm text-slate-400 flex items-center gap-2">
+                  Buffer (m)
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder="0"
+                    value={bufferMeters}
+                    onChange={(e) => setBufferMeters(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm w-24 text-slate-100"
+                  />
+                </label>
+                <label className="text-sm text-slate-400 flex items-center gap-2">
+                  H3 res
+                  <input
+                    type="number"
+                    min={0}
+                    max={15}
+                    placeholder="off"
+                    value={h3Resolution}
+                    onChange={(e) => setH3Resolution(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm w-20 text-slate-100"
                   />
                 </label>
               </div>
@@ -392,14 +443,11 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Drop vs Paste toggle */}
             <div className="flex justify-center gap-1 p-1 bg-slate-900 rounded-xl border border-slate-800 w-fit mx-auto">
               <button
                 onClick={() => setInputMode("drop")}
                 className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${
-                  inputMode === "drop"
-                    ? "bg-emerald-600 text-white"
-                    : "text-slate-400 hover:text-white"
+                  inputMode === "drop" ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white"
                 }`}
               >
                 Drop file
@@ -407,9 +455,7 @@ export default function Home() {
               <button
                 onClick={() => setInputMode("paste")}
                 className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${
-                  inputMode === "paste"
-                    ? "bg-emerald-600 text-white"
-                    : "text-slate-400 hover:text-white"
+                  inputMode === "paste" ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white"
                 }`}
               >
                 Paste data
@@ -420,18 +466,12 @@ export default function Home() {
               <div
                 {...getRootProps()}
                 className={`border-2 border-dashed rounded-2xl p-12 sm:p-16 text-center cursor-pointer transition
-                  ${
-                    isDragActive
-                      ? "border-emerald-400 bg-emerald-950/30"
-                      : "border-slate-700 hover:border-slate-500"
-                  }
+                  ${isDragActive ? "border-emerald-400 bg-emerald-950/30" : "border-slate-700 hover:border-slate-500"}
                   ${loading ? "opacity-60 pointer-events-none" : ""}`}
               >
                 <input {...getInputProps()} />
                 <p className="text-lg">
-                  {isDragActive
-                    ? "Drop it!"
-                    : "Drag & drop CSV, GeoJSON, or Shapefile (.zip)"}
+                  {isDragActive ? "Drop it!" : "Drag & drop CSV, GeoJSON, or Shapefile (.zip)"}
                 </p>
                 <p className="text-sm text-slate-500 mt-2">or click to browse</p>
               </div>
@@ -449,16 +489,30 @@ export default function Home() {
                   <button
                     onClick={runPaste}
                     disabled={loading || !pasteText.trim()}
-                    className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-sm font-medium transition"
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-sm font-medium transition"
                   >
                     Clean pasted data
+                  </button>
+                  <button
+                    onClick={runGeocode}
+                    disabled={loading || !pasteText.trim()}
+                    className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 rounded-lg text-sm font-medium transition"
+                  >
+                    Geocode addresses
                   </button>
                   <button
                     onClick={() => setPasteText(SAMPLE_CSV)}
                     disabled={loading}
                     className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition border border-slate-700"
                   >
-                    Fill sample CSV
+                    Sample CSV
+                  </button>
+                  <button
+                    onClick={() => setPasteText(SAMPLE_ADDRESSES)}
+                    disabled={loading}
+                    className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition border border-slate-700"
+                  >
+                    Sample addresses
                   </button>
                   <button
                     onClick={() => setPasteText("")}
@@ -468,6 +522,9 @@ export default function Home() {
                     Clear
                   </button>
                 </div>
+                <p className="text-center text-xs text-slate-500">
+                  Geocoding uses OpenStreetMap Nominatim (max 25 addresses, ~1/sec).
+                </p>
               </div>
             )}
 
@@ -502,8 +559,8 @@ export default function Home() {
                 <h2 className="text-xl font-semibold">Map preview</h2>
                 <p className="text-sm text-slate-400">
                   {result
-                    ? `${result.feature_count} cleaned features · click for details`
-                    : "Clean some data first to see it here"}
+                    ? `${result.feature_count} features · click for details`
+                    : "Clean or geocode data first"}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -523,7 +580,7 @@ export default function Home() {
             <div className="h-[420px] sm:h-[520px] rounded-2xl overflow-hidden border border-slate-800">
               <Map
                 initialViewState={mapView}
-                key={result ? `${result.feature_count}-${targetCrs}` : "empty"}
+                key={result ? `${result.feature_count}-${targetCrs}-${bufferMeters}` : "empty"}
                 style={{ width: "100%", height: "100%" }}
                 mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
                 interactiveLayerIds={result ? ["points", "polygons-fill", "lines"] : []}
@@ -537,28 +594,19 @@ export default function Home() {
                       id="polygons-fill"
                       type="fill"
                       filter={["==", ["geometry-type"], "Polygon"]}
-                      paint={{
-                        "fill-color": "#34d399",
-                        "fill-opacity": 0.35,
-                      }}
+                      paint={{ "fill-color": "#34d399", "fill-opacity": 0.35 }}
                     />
                     <Layer
                       id="polygons-outline"
                       type="line"
                       filter={["==", ["geometry-type"], "Polygon"]}
-                      paint={{
-                        "line-color": "#059669",
-                        "line-width": 2,
-                      }}
+                      paint={{ "line-color": "#059669", "line-width": 2 }}
                     />
                     <Layer
                       id="lines"
                       type="line"
                       filter={["==", ["geometry-type"], "LineString"]}
-                      paint={{
-                        "line-color": "#34d399",
-                        "line-width": 3,
-                      }}
+                      paint={{ "line-color": "#34d399", "line-width": 3 }}
                     />
                     <Layer
                       id="points"
@@ -582,7 +630,7 @@ export default function Home() {
                     closeOnClick={false}
                     className="text-slate-900"
                   >
-                    <div className="text-xs space-y-1 max-w-[220px]">
+                    <div className="text-xs space-y-1 max-w-[240px]">
                       {Object.entries(popupInfo.properties).map(([k, v]) => (
                         <div key={k}>
                           <span className="font-semibold">{k}:</span> {String(v)}
@@ -611,10 +659,7 @@ export default function Home() {
                     <thead className="bg-slate-950 sticky top-0">
                       <tr>
                         {attributeColumns.map((col) => (
-                          <th
-                            key={col}
-                            className="px-3 py-2 font-medium text-slate-400 whitespace-nowrap"
-                          >
+                          <th key={col} className="px-3 py-2 font-medium text-slate-400 whitespace-nowrap">
                             {col}
                           </th>
                         ))}
@@ -635,53 +680,39 @@ export default function Home() {
                 </div>
               </div>
             )}
-
-            {!result && (
-              <p className="text-center text-slate-500 text-sm">
-                Go to the{" "}
-                <button onClick={() => setTab("clean")} className="text-emerald-400 underline">
-                  Clean
-                </button>{" "}
-                tab or load the sample.
-              </p>
-            )}
           </div>
         )}
 
         {tab === "features" && (
           <div className="space-y-6">
             <div>
-              <h2 className="text-xl font-semibold">What else can it do?</h2>
-              <p className="text-slate-400 text-sm mt-1">
-                Current capabilities + the next things we can ship for gh-impact.
-              </p>
+              <h2 className="text-xl font-semibold">What it can do</h2>
+              <p className="text-slate-400 text-sm mt-1">Live capabilities for gh-impact wrangler.</p>
             </div>
-
             <div className="grid sm:grid-cols-2 gap-4">
               <FeatureCard
                 title="Already live"
                 items={[
                   "Drop CSV / GeoJSON / Shapefile (.zip)",
-                  "Paste raw CSV, GeoJSON, or lat/lon lines",
-                  "One-click sample parks dataset",
-                  "Auto lat/lon detection",
-                  "Geometry validation & repair",
-                  "Source + target CRS controls",
+                  "Paste CSV, GeoJSON, or lat/lon lines",
+                  "Geocode addresses (Nominatim)",
+                  "Buffer geometries (meters)",
+                  "H3 hexagonal indexing",
+                  "Source + target CRS",
+                  "Validate, repair, dedupe",
+                  "Map + popups + attribute table",
                   "Export GeoJSON · CSV · Copy",
-                  "Map: points, lines & polygons",
-                  "Click popups + attribute table",
                 ]}
                 accent="emerald"
               />
               <FeatureCard
                 title="Next up"
                 items={[
-                  "Address geocoding",
-                  "Buffer, clip, spatial join",
-                  "H3 / geohash indexing",
+                  "Spatial join / clip",
                   "Attribute cleaning rules",
                   "Save & share wrangle recipes",
-                  "Batch / API key access",
+                  "Batch / API keys",
+                  "Team workspaces",
                 ]}
                 accent="sky"
               />
