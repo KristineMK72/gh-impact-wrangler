@@ -28,18 +28,6 @@ Mystery Park,, ,Nowhere
 Bad Coords,999,999,Atlantis
 Central Park again,40.7829,-73.9654,New York`;
 
-const SAMPLE_ADDRESSES = `Golden Gate Park, San Francisco, CA
-Central Park, New York, NY
-Griffith Observatory, Los Angeles, CA
-Millennium Park, Chicago, IL
-Balboa Park, San Diego, CA`;
-
-const CRS_OPTIONS = [
-  { value: "EPSG:4326", label: "WGS84 (EPSG:4326) — web maps" },
-  { value: "EPSG:3857", label: "Web Mercator (EPSG:3857)" },
-  { value: "EPSG:4269", label: "NAD83 (EPSG:4269)" },
-];
-
 function pasteToFile(raw: string): File {
   const text = raw.trim();
   if (!text) throw new Error("Nothing to paste");
@@ -79,6 +67,45 @@ function applyResult(data: any) {
     omitted,
     feature_count: data.feature_count ?? data.geojson?.features?.length ?? 0,
   };
+}
+
+function HowTo() {
+  return (
+    <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 md:p-6 space-y-4 text-left">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-1">How to use Wrangler</p>
+        <h2 className="text-lg font-semibold">Turn messy location files into web-ready GeoJSON</h2>
+        <p className="text-sm text-slate-400 mt-2 leading-relaxed">
+          Most mapping time is spent fixing files, not mapping. Drop a spreadsheet or paste rows.
+          Wrangler finds coordinates, drops bad rows, and hands you clean features plus a list of what was omitted and why.
+        </p>
+      </div>
+      <ol className="space-y-2 text-sm text-slate-300 list-decimal pl-5">
+        <li>
+          <span className="text-white font-medium">Start with the sample</span> to see a kept set and an omitted report.
+        </li>
+        <li>
+          <span className="text-white font-medium">Drop a file</span> — CSV with lat/lon columns, GeoJSON, or a zipped shapefile.
+        </li>
+        <li>
+          <span className="text-white font-medium">Or paste</span> CSV, GeoJSON, raw coordinates, or addresses (then Geocode).
+        </li>
+        <li>
+          <span className="text-white font-medium">Check Map</span> for points, the amber omitted panel, then export GeoJSON.
+        </li>
+      </ol>
+      <div className="grid sm:grid-cols-2 gap-3 text-xs text-slate-400">
+        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+          <p className="text-slate-200 font-medium mb-1">CSV columns it recognizes</p>
+          lat, latitude, y · lon, lng, long, longitude, x
+        </div>
+        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+          <p className="text-slate-200 font-medium mb-1">Why rows get omitted</p>
+          blank coords, not numbers, lat/lon out of range, duplicates, missing geometry
+        </div>
+      </div>
+    </section>
+  );
 }
 
 export default function Home() {
@@ -271,13 +298,11 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {toast && (
-        <div
-          className={`fixed top-16 right-4 z-50 max-w-sm rounded-xl px-4 py-3 text-sm shadow-lg border ${
-            toast.kind === "ok"
-              ? "bg-emerald-900/95 border-emerald-500 text-emerald-50"
-              : "bg-rose-900/95 border-rose-500 text-rose-50"
-          }`}
-        >
+        <div className={`fixed top-16 right-4 z-50 max-w-sm rounded-xl px-4 py-3 text-sm shadow-lg border ${
+          toast.kind === "ok"
+            ? "bg-emerald-900/95 border-emerald-500 text-emerald-50"
+            : "bg-rose-900/95 border-rose-500 text-rose-50"
+        }`}>
           {toast.text}
         </div>
       )}
@@ -296,7 +321,7 @@ export default function Home() {
                   tab === id ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white hover:bg-slate-800"
                 }`}
               >
-                {id === "features" ? "Roadmap" : id}
+                {id === "features" ? "How to" : id}
               </button>
             ))}
           </nav>
@@ -310,12 +335,9 @@ export default function Home() {
               <h1 className="text-3xl font-bold tracking-tight">Zero-friction geo cleaning</h1>
               <p className="text-slate-400">Drop · paste · geocode → kept features + omitted report</p>
             </div>
+            <HowTo />
             <div className="flex justify-center">
-              <button
-                onClick={loadSample}
-                disabled={loading}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-sm font-medium"
-              >
+              <button onClick={loadSample} disabled={loading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-sm font-medium">
                 {loading ? "Working…" : "Try sample parks data"}
               </button>
             </div>
@@ -355,17 +377,13 @@ export default function Home() {
                 <p className="font-medium">Omitted {omitted.count}</p>
                 <ul className="list-disc pl-5 text-amber-200/90 space-y-0.5">
                   {Object.entries(omitted.reasons).map(([reason, n]) => (
-                    <li key={reason}>
-                      {n} × {reason}
-                    </li>
+                    <li key={reason}>{n} × {reason}</li>
                   ))}
                 </ul>
                 {omitted.samples?.length > 0 && (
                   <div className="text-xs text-amber-200/80 space-y-1 pt-1">
                     {omitted.samples.map((s: any, i: number) => (
-                      <div key={i}>
-                        <span className="text-amber-400">{s.reason}:</span> {s.preview}
-                      </div>
+                      <div key={i}><span className="text-amber-400">{s.reason}:</span> {s.preview}</div>
                     ))}
                   </div>
                 )}
@@ -406,9 +424,7 @@ export default function Home() {
           </div>
         )}
 
-        {tab === "features" && (
-          <p className="text-slate-400 text-sm">Omitted rows now show reason + a preview snippet (blank coords, non-numeric, out of range, duplicates, missing geometry).</p>
-        )}
+        {tab === "features" && <HowTo />}
       </main>
     </div>
   );
