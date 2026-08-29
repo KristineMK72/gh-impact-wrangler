@@ -28,6 +28,12 @@ Mystery Park,, ,Nowhere
 Bad Coords,999,999,Atlantis
 Central Park again,40.7829,-73.9654,New York`;
 
+const CRS_OPTIONS = [
+  { value: "EPSG:4326", label: "WGS84 (4326)" },
+  { value: "EPSG:3857", label: "Web Mercator (3857)" },
+  { value: "EPSG:4269", label: "NAD83 (4269)" },
+];
+
 function pasteToFile(raw: string): File {
   const text = raw.trim();
   if (!text) throw new Error("Nothing to paste");
@@ -69,6 +75,15 @@ function applyResult(data: any) {
   };
 }
 
+function clickDownload(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function HowTo() {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 md:p-6 space-y-4 text-left">
@@ -76,34 +91,15 @@ function HowTo() {
         <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-1">How to use Wrangler</p>
         <h2 className="text-lg font-semibold">Turn messy location files into web-ready GeoJSON</h2>
         <p className="text-sm text-slate-400 mt-2 leading-relaxed">
-          Most mapping time is spent fixing files, not mapping. Drop a spreadsheet or paste rows.
-          Wrangler finds coordinates, drops bad rows, and hands you clean features plus a list of what was omitted and why.
+          Drop a spreadsheet or paste rows. Wrangler finds coordinates, drops bad rows, and hands you clean features plus what was omitted and why.
         </p>
       </div>
       <ol className="space-y-2 text-sm text-slate-300 list-decimal pl-5">
-        <li>
-          <span className="text-white font-medium">Start with the sample</span> to see a kept set and an omitted report.
-        </li>
-        <li>
-          <span className="text-white font-medium">Drop a file</span> — CSV with lat/lon columns, GeoJSON, or a zipped shapefile.
-        </li>
-        <li>
-          <span className="text-white font-medium">Or paste</span> CSV, GeoJSON, raw coordinates, or addresses (then Geocode).
-        </li>
-        <li>
-          <span className="text-white font-medium">Check Map</span> for points, the amber omitted panel, then export GeoJSON.
-        </li>
+        <li><span className="text-white font-medium">Start with the sample</span> to see kept + omitted.</li>
+        <li><span className="text-white font-medium">Drop a file</span> — CSV, GeoJSON, or zipped shapefile.</li>
+        <li><span className="text-white font-medium">Or paste</span> CSV, GeoJSON, coords, or addresses (Geocode).</li>
+        <li><span className="text-white font-medium">Export</span> GeoJSON, CSV, copy, or omitted.csv.</li>
       </ol>
-      <div className="grid sm:grid-cols-2 gap-3 text-xs text-slate-400">
-        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-          <p className="text-slate-200 font-medium mb-1">CSV columns it recognizes</p>
-          lat, latitude, y · lon, lng, long, longitude, x
-        </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
-          <p className="text-slate-200 font-medium mb-1">Why rows get omitted</p>
-          blank coords, not numbers, lat/lon out of range, duplicates, missing geometry
-        </div>
-      </div>
     </section>
   );
 }
@@ -199,7 +195,7 @@ export default function Home() {
       return;
     }
     setLoading(true);
-    setStatus("Geocoding addresses (Nominatim, ~1/sec)...");
+    setStatus("Geocoding addresses...");
     setResult(null);
     const formData = new FormData();
     formData.append("addresses", text);
@@ -284,27 +280,80 @@ export default function Home() {
 
   const downloadGeoJSON = () => {
     if (!result?.geojson) return;
-    const blob = new Blob([JSON.stringify(result.geojson, null, 2)], {
-      type: "application/geo+json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "cleaned.geojson";
-    a.click();
-    URL.revokeObjectURL(url);
+    clickDownload(
+      "cleaned.geojson",
+      new Blob([JSON.stringify(result.geojson, null, 2)], { type: "application/geo+json" })
+    );
   };
+
+  const downloadCSV = () => {
+    if (!result?.geojson?.features?.length) return;
+    const features = result.geojson.features;
+    const propsKeys = new Set<string>();
+    features.forEach((f: any) => Object.keys(f.properties || {}).forEach((k) => propsKeys.add(k)));
+    const cols = ["longitude", "latitude", ...Array.from(propsKeys)];
+    const lines = [cols.join(",")];
+    for (const f of features) {
+      let lon = "";
+      let lat = "";
+      if (f.geometry?.type === "Point") {
+        lon = String(f.geometry.coordinates[0]);
+        lat = String(f.geometry.coordinates[1]);
+      }
+      lines.push(
+        cols
+          .map((c) => {
+            if (c === "longitude") return lon;
+            if (c === "latitude") return lat;
+            const v = f.properties?.[c];
+            if (v == null) return "";
+            const s = String(v).replace(/"/g, '""');
+            return s.includes(",") || s.includes('"') ? `"${s}"` : s;
+          })
+          .join(",")
+      );
+    }
+    clickDownload("cleaned.csv", new Blob([lines.join("\n")], { type: "text/csv" }));
+  };
+
+  const downloadOmitted = () => {
+    if (!omitted?.samples?.length && !omitted?.count) return;
+    const lines = ["reason,preview"];
+    (omitted.samples || []).forEach((s: any) => {
+      const preview = String(s.preview || "").replace(/"/g, '""');
+      lines.push(`"${s.reason}","${preview}"`);
+    });
+    Object.entries(omitted.reasons || {}).forEach(([reason, n]) => {
+      lines.push(`"${reason} (count)","${n}"`);
+    });
+    clickDownload("omitted.csv", new Blob([lines.join("\n")], { type: "text/csv" }));
+  };
+
+  const copyGeoJSON = async () => {
+    if (!result?.geojson) return;
+    await navigator.clipboard.writeText(JSON.stringify(result.geojson, null, 2));
+    setCopied(true);
+    showToast("ok", "GeoJSON copied");
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const exportBar = result && (
+    <div className="flex flex-wrap gap-2">
+      <button onClick={downloadGeoJSON} className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm">GeoJSON</button>
+      <button onClick={downloadCSV} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm">CSV</button>
+      <button onClick={copyGeoJSON} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm">{copied ? "Copied" : "Copy"}</button>
+      {omitted && omitted.count > 0 && (
+        <button onClick={downloadOmitted} className="px-3 py-2 bg-amber-700 hover:bg-amber-600 rounded-lg text-sm">Omitted CSV</button>
+      )}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {toast && (
         <div className={`fixed top-16 right-4 z-50 max-w-sm rounded-xl px-4 py-3 text-sm shadow-lg border ${
-          toast.kind === "ok"
-            ? "bg-emerald-900/95 border-emerald-500 text-emerald-50"
-            : "bg-rose-900/95 border-rose-500 text-rose-50"
-        }`}>
-          {toast.text}
-        </div>
+          toast.kind === "ok" ? "bg-emerald-900/95 border-emerald-500 text-emerald-50" : "bg-rose-900/95 border-rose-500 text-rose-50"
+        }`}>{toast.text}</div>
       )}
       <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
@@ -314,15 +363,9 @@ export default function Home() {
           </div>
           <nav className="flex gap-1">
             {(["clean", "map", "features"] as Tab[]).map((id) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium capitalize transition ${
-                  tab === id ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white hover:bg-slate-800"
-                }`}
-              >
-                {id === "features" ? "How to" : id}
-              </button>
+              <button key={id} onClick={() => setTab(id)} className={`px-3 py-1.5 rounded-lg text-sm font-medium capitalize ${
+                tab === id ? "bg-emerald-600 text-white" : "text-slate-400 hover:bg-slate-800"
+              }`}>{id === "features" ? "How to" : id}</button>
             ))}
           </nav>
         </div>
@@ -336,6 +379,23 @@ export default function Home() {
               <p className="text-slate-400">Drop · paste · geocode → kept features + omitted report</p>
             </div>
             <HowTo />
+            <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-slate-400">
+              <label className="flex items-center gap-2">Target CRS
+                <select value={targetCrs} onChange={(e) => setTargetCrs(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-100">
+                  {CRS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-2">Source CRS
+                <input value={sourceCrs} onChange={(e) => setSourceCrs(e.target.value)} placeholder="auto" className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 w-28 text-slate-100" />
+              </label>
+              <label className="flex items-center gap-2">Buffer m
+                <input type="number" min={0} value={bufferMeters} onChange={(e) => setBufferMeters(e.target.value)} placeholder="0" className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 w-20 text-slate-100" />
+              </label>
+              <label className="flex items-center gap-2">H3
+                <input type="number" min={0} max={15} value={h3Resolution} onChange={(e) => setH3Resolution(e.target.value)} placeholder="off" className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 w-16 text-slate-100" />
+              </label>
+            </div>
+            <p className="text-center text-[11px] text-slate-500">Buffer and H3 run on the server. If the API times out, CSV/GeoJSON still clean in the browser without those extras.</p>
             <div className="flex justify-center">
               <button onClick={loadSample} disabled={loading} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-sm font-medium">
                 {loading ? "Working…" : "Try sample parks data"}
@@ -368,13 +428,16 @@ export default function Home() {
           <div className="space-y-4">
             {result && (
               <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-100">
-                Kept {result.feature_count} features
-                {omitted && omitted.count > 0 ? ` · omitted ${omitted.count}` : " · none omitted"}.
+                Kept {result.feature_count} features{omitted && omitted.count > 0 ? ` · omitted ${omitted.count}` : " · none omitted"}.
+                {bufferMeters ? ` · buffer ${bufferMeters}m` : ""}{h3Resolution ? ` · H3 ${h3Resolution}` : ""} · {targetCrs}
               </div>
             )}
             {omitted && omitted.count > 0 && (
               <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-100 space-y-2">
-                <p className="font-medium">Omitted {omitted.count}</p>
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <p className="font-medium">Omitted {omitted.count}</p>
+                  <button onClick={downloadOmitted} className="px-3 py-1.5 bg-amber-700 rounded-lg text-xs">Download omitted.csv</button>
+                </div>
                 <ul className="list-disc pl-5 text-amber-200/90 space-y-0.5">
                   {Object.entries(omitted.reasons).map(([reason, n]) => (
                     <li key={reason}>{n} × {reason}</li>
@@ -391,9 +454,7 @@ export default function Home() {
             )}
             <div className="flex items-center justify-between gap-4 flex-wrap">
               <h2 className="text-xl font-semibold">Map preview</h2>
-              {result && (
-                <button onClick={downloadGeoJSON} className="px-3 py-2 bg-emerald-600 rounded-lg text-sm">GeoJSON</button>
-              )}
+              {exportBar}
             </div>
             <div className="h-[420px] sm:h-[520px] rounded-2xl overflow-hidden border border-slate-800">
               <Map initialViewState={mapView} key={result ? String(result.feature_count) : "empty"} style={{ width: "100%", height: "100%" }} mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" interactiveLayerIds={result ? ["points", "polygons-fill", "lines"] : []} onClick={(e: MapLayerMouseEvent) => {
@@ -429,17 +490,8 @@ export default function Home() {
 
       <footer className="mt-auto border-t border-slate-800">
         <div className="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
-          <p>
-            <span className="text-slate-300 font-medium">Spatialytics</span>
-            <span className="mx-2">·</span>
-            © 2026
-          </p>
-          <p className="text-center sm:text-right">
-            gh-impact wrangler · Brainerd Lakes ·{" "}
-            <a href="https://spatialytics-astro.vercel.app" className="text-emerald-400 hover:underline" target="_blank" rel="noreferrer">
-              spatialytics.space
-            </a>
-          </p>
+          <p><span className="text-slate-300 font-medium">Spatialytics</span><span className="mx-2">·</span>© 2026</p>
+          <p className="text-center sm:text-right">gh-impact wrangler · Brainerd Lakes · <a href="https://spatialytics-astro.vercel.app" className="text-emerald-400 hover:underline" target="_blank" rel="noreferrer">spatialytics.space</a></p>
         </div>
       </footer>
     </div>
