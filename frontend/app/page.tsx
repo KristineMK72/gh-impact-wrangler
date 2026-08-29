@@ -10,6 +10,7 @@ import Map, {
   MapLayerMouseEvent,
 } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { cleanFileInBrowser } from "../lib/clientClean";
 
 type Tab = "clean" | "map" | "features";
 
@@ -88,11 +89,17 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [inputMode, setInputMode] = useState<"drop" | "paste">("drop");
+  const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [popupInfo, setPopupInfo] = useState<{
     longitude: number;
     latitude: number;
     properties: Record<string, unknown>;
   } | null>(null);
+
+  function showToast(kind: "ok" | "err", text: string) {
+    setToast({ kind, text });
+    window.setTimeout(() => setToast(null), 6000);
+  }
 
   const appendExtras = useCallback(
     (formData: FormData) => {
@@ -119,17 +126,35 @@ export default function Home() {
       appendExtras(formData);
 
       try {
-        const res = await fetch("/api/clean", { method: "POST", body: formData });
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 20000);
+        const res = await fetch("/api/clean", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
+        window.clearTimeout(timer);
         const data = await res.json();
-        if (!res.ok) {
-          setStatus(`Error: ${data.detail || "Something went wrong"}`);
-          return;
-        }
+        if (!res.ok) throw new Error(data.detail || "Server clean failed");
         setResult(data);
-        setStatus(`Done! ${data.feature_count} features cleaned.`);
+        const msg = `Done! ${data.feature_count} features cleaned.`;
+        setStatus(msg);
+        showToast("ok", msg);
         setTab("map");
+        return;
       } catch (err: any) {
-        setStatus(`Failed to reach API: ${err.message}`);
+        try {
+          const local = await cleanFileInBrowser(file);
+          setResult(local);
+          const msg = `Done! ${local.feature_count} features cleaned (browser).`;
+          setStatus(msg);
+          showToast("ok", msg);
+          setTab("map");
+        } catch (localErr: any) {
+          const msg = localErr?.message || err?.message || "Could not clean file";
+          setStatus(`Error: ${msg}`);
+          showToast("err", msg);
+        }
       } finally {
         setLoading(false);
       }
@@ -141,6 +166,7 @@ export default function Home() {
     const text = pasteText.trim();
     if (!text) {
       setStatus("Paste addresses first (one per line)");
+      showToast("err", "Paste addresses first (one per line)");
       return;
     }
     setLoading(true);
@@ -156,14 +182,20 @@ export default function Home() {
       const res = await fetch("/api/geocode", { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok) {
-        setStatus(`Error: ${data.detail || "Geocoding failed"}`);
+        const msg = data.detail || "Geocoding failed";
+        setStatus(`Error: ${msg}`);
+        showToast("err", msg);
         return;
       }
       setResult(data);
-      setStatus(`Done! Geocoded ${data.feature_count} addresses.`);
+      const msg = `Done! Geocoded ${data.feature_count} addresses.`;
+      setStatus(msg);
+      showToast("ok", msg);
       setTab("map");
     } catch (err: any) {
-      setStatus(`Failed: ${err.message}`);
+      const msg = err.message || "Geocoding failed";
+      setStatus(`Failed: ${msg}`);
+      showToast("err", msg);
     } finally {
       setLoading(false);
     }
@@ -185,7 +217,9 @@ export default function Home() {
     try {
       await runClean(pasteToFile(pasteText));
     } catch (e: any) {
-      setStatus(e.message || "Could not parse pasted data");
+      const msg = e.message || "Could not parse pasted data";
+      setStatus(msg);
+      showToast("err", msg);
     }
   }, [pasteText, runClean]);
 
@@ -349,6 +383,17 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      {toast && (
+        <div
+          className={`fixed top-16 right-4 z-50 max-w-sm rounded-xl px-4 py-3 text-sm shadow-lg border ${
+            toast.kind === "ok"
+              ? "bg-emerald-900/95 border-emerald-500 text-emerald-50"
+              : "bg-rose-900/95 border-rose-500 text-rose-50"
+          }`}
+        >
+          {toast.text}
+        </div>
+      )}
       <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-20">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -383,7 +428,6 @@ export default function Home() {
               </p>
             </div>
 
-            {/* Options */}
             <div className="flex flex-col gap-3 items-center">
               <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center justify-center gap-3">
                 <label className="text-sm text-slate-400 flex items-center gap-2">
@@ -437,9 +481,9 @@ export default function Home() {
               <button
                 onClick={loadSample}
                 disabled={loading}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 rounded-lg text-sm font-medium transition border border-slate-700"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-sm font-medium transition"
               >
-                Try sample parks data
+                {loading ? "Working…" : "Try sample parks data"}
               </button>
             </div>
 
@@ -522,38 +566,22 @@ export default function Home() {
                     Clear
                   </button>
                 </div>
-                <p className="text-center text-xs text-slate-500">
-                  Geocoding uses OpenStreetMap Nominatim (max 25 addresses, ~1/sec).
-                </p>
               </div>
             )}
 
-            <div className="text-center text-sm text-slate-400">{status}</div>
-
-            {result && (
-              <div className="bg-slate-900 rounded-xl p-6 space-y-4 border border-slate-800">
-                <div className="flex items-center justify-between gap-4 flex-wrap">
-                  <h2 className="font-semibold text-emerald-400">Audit log</h2>
-                  <div className="flex flex-wrap gap-2 items-center">
-                    <button
-                      onClick={() => setTab("map")}
-                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-sm font-medium transition"
-                    >
-                      View on map
-                    </button>
-                    {exportButtons}
-                  </div>
-                </div>
-                <pre className="text-xs overflow-auto max-h-48 bg-slate-950 p-4 rounded border border-slate-800">
-                  {JSON.stringify(result.audit, null, 2)}
-                </pre>
-              </div>
-            )}
+            <div className={`text-center text-sm font-medium ${status.startsWith("Error") || status.startsWith("Failed") ? "text-rose-400" : "text-emerald-300"}`}>
+              {loading ? "Working… first run can take ~20 seconds." : status}
+            </div>
           </div>
         )}
 
         {tab === "map" && (
           <div className="space-y-4">
+            {result && (
+              <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-100">
+                Cleaned {result.feature_count} features. Export with GeoJSON / CSV, or click a point for attributes.
+              </div>
+            )}
             <div className="flex items-center justify-between gap-4 flex-wrap">
               <div>
                 <h2 className="text-xl font-semibold">Map preview</h2>
@@ -590,46 +618,14 @@ export default function Home() {
                 <NavigationControl position="top-right" />
                 {result?.geojson && (
                   <Source id="cleaned" type="geojson" data={result.geojson}>
-                    <Layer
-                      id="polygons-fill"
-                      type="fill"
-                      filter={["==", ["geometry-type"], "Polygon"]}
-                      paint={{ "fill-color": "#34d399", "fill-opacity": 0.35 }}
-                    />
-                    <Layer
-                      id="polygons-outline"
-                      type="line"
-                      filter={["==", ["geometry-type"], "Polygon"]}
-                      paint={{ "line-color": "#059669", "line-width": 2 }}
-                    />
-                    <Layer
-                      id="lines"
-                      type="line"
-                      filter={["==", ["geometry-type"], "LineString"]}
-                      paint={{ "line-color": "#34d399", "line-width": 3 }}
-                    />
-                    <Layer
-                      id="points"
-                      type="circle"
-                      filter={["==", ["geometry-type"], "Point"]}
-                      paint={{
-                        "circle-radius": 8,
-                        "circle-color": "#34d399",
-                        "circle-stroke-width": 2,
-                        "circle-stroke-color": "#064e3b",
-                      }}
-                    />
+                    <Layer id="polygons-fill" type="fill" filter={["==", ["geometry-type"], "Polygon"]} paint={{ "fill-color": "#34d399", "fill-opacity": 0.35 }} />
+                    <Layer id="polygons-outline" type="line" filter={["==", ["geometry-type"], "Polygon"]} paint={{ "line-color": "#059669", "line-width": 2 }} />
+                    <Layer id="lines" type="line" filter={["==", ["geometry-type"], "LineString"]} paint={{ "line-color": "#34d399", "line-width": 3 }} />
+                    <Layer id="points" type="circle" filter={["==", ["geometry-type"], "Point"]} paint={{ "circle-radius": 8, "circle-color": "#34d399", "circle-stroke-width": 2, "circle-stroke-color": "#064e3b" }} />
                   </Source>
                 )}
                 {popupInfo && (
-                  <Popup
-                    longitude={popupInfo.longitude}
-                    latitude={popupInfo.latitude}
-                    anchor="bottom"
-                    onClose={() => setPopupInfo(null)}
-                    closeOnClick={false}
-                    className="text-slate-900"
-                  >
+                  <Popup longitude={popupInfo.longitude} latitude={popupInfo.latitude} anchor="bottom" onClose={() => setPopupInfo(null)} closeOnClick={false} className="text-slate-900">
                     <div className="text-xs space-y-1 max-w-[240px]">
                       {Object.entries(popupInfo.properties).map(([k, v]) => (
                         <div key={k}>
@@ -644,42 +640,6 @@ export default function Home() {
                 )}
               </Map>
             </div>
-
-            {attributeRows.length > 0 && (
-              <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-slate-300">Attributes</h3>
-                  <span className="text-xs text-slate-500">
-                    showing {attributeRows.length}
-                    {result.feature_count > 50 ? ` of ${result.feature_count}` : ""}
-                  </span>
-                </div>
-                <div className="overflow-x-auto max-h-56">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-slate-950 sticky top-0">
-                      <tr>
-                        {attributeColumns.map((col) => (
-                          <th key={col} className="px-3 py-2 font-medium text-slate-400 whitespace-nowrap">
-                            {col}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {attributeRows.map((row: any) => (
-                        <tr key={row.id} className="border-t border-slate-800/80">
-                          {attributeColumns.map((col) => (
-                            <td key={col} className="px-3 py-2 text-slate-300 whitespace-nowrap">
-                              {row[col] != null ? String(row[col]) : "—"}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -687,35 +647,10 @@ export default function Home() {
           <div className="space-y-6">
             <div>
               <h2 className="text-xl font-semibold">What it can do</h2>
-              <p className="text-slate-400 text-sm mt-1">Live capabilities for gh-impact wrangler.</p>
             </div>
             <div className="grid sm:grid-cols-2 gap-4">
-              <FeatureCard
-                title="Already live"
-                items={[
-                  "Drop CSV / GeoJSON / Shapefile (.zip)",
-                  "Paste CSV, GeoJSON, or lat/lon lines",
-                  "Geocode addresses (Nominatim)",
-                  "Buffer geometries (meters)",
-                  "H3 hexagonal indexing",
-                  "Source + target CRS",
-                  "Validate, repair, dedupe",
-                  "Map + popups + attribute table",
-                  "Export GeoJSON · CSV · Copy",
-                ]}
-                accent="emerald"
-              />
-              <FeatureCard
-                title="Next up"
-                items={[
-                  "Spatial join / clip",
-                  "Attribute cleaning rules",
-                  "Save & share wrangle recipes",
-                  "Batch / API keys",
-                  "Team workspaces",
-                ]}
-                accent="sky"
-              />
+              <FeatureCard title="Already live" accent="emerald" items={["Drop CSV / GeoJSON / Shapefile (.zip)", "Browser fallback if API is slow", "Paste CSV, GeoJSON, or lat/lon lines", "Geocode addresses", "Map + export"]} />
+              <FeatureCard title="Needs server" accent="sky" items={["Shapefile zip", "Buffer / H3", "CRS reprojection", "Geometry repair"]} />
             </div>
           </div>
         )}
