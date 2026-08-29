@@ -426,6 +426,22 @@ export default function Home() {
 
         {tab === "features" && <HowTo />}
       </main>
+
+      <footer className="mt-auto border-t border-slate-800">
+        <div className="max-w-5xl mx-auto px-4 py-6 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+          <p>
+            <span className="text-slate-300 font-medium">Spatialytics</span>
+            <span className="mx-2">·</span>
+            © 2026
+          </p>
+          <p className="text-center sm:text-right">
+            gh-impact wrangler · Brainerd Lakes ·{" "}
+            <a href="https://spatialytics-astro.vercel.app" className="text-emerald-400 hover:underline" target="_blank" rel="noreferrer">
+              spatialytics.space
+            </a>
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
